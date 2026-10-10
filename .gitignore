@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+.dev.vars
+data/*.pdf
+data/chunks.jsonl
+__pycache__/
+.venv/
+eval/results.json

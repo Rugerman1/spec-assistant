@@ -1,0 +1,7 @@
+[
+  { "q": "What is the posted speed limit on Interstate 26 near Columbia?", "expect": [], "note": "Traffic law, not a construction spec" },
+  { "q": "How much does SCDOT pay a starting engineer?", "expect": [], "note": "HR question" },
+  { "q": "What are the AASHTO LRFD load factors for the Strength I limit state?", "expect": [], "note": "Bridge design code, a different (copyrighted) document" },
+  { "q": "Who is the current Secretary of Transportation for South Carolina?", "expect": [], "note": "Current events" },
+  { "q": "What is the best brand of concrete mixer to buy?", "expect": [], "note": "Opinion, not in any spec" }
+]

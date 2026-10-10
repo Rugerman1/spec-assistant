@@ -1,0 +1,8 @@
+Save the SCDOT 2025 Standard Specifications PDF in this folder, named:
+
+  2025_SCDOT_Standard_Specifications.pdf
+
+Download link (free, public):
+https://www.scdot.org/content/dam/scdot-legacy/business/pdf/2025_SCDOT_Standard_Specifications.pdf
+
+The ingest script reads it from here. The PDF is not committed to git.

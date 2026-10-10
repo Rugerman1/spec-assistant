@@ -1,0 +1,28 @@
+name = "spec-assistant"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Chunk text, metadata, and the keyword (full-text) index.
+[[d1_databases]]
+binding = "DB"
+database_name = "spec-assistant"
+database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
+migrations_dir = "migrations"
+
+# Vector index for meaning-based search. Create it with:
+#   npx wrangler vectorize create spec-assistant --dimensions=768 --metric=cosine
+[[vectorize]]
+binding = "VECTORS"
+index_name = "spec-assistant"
+
+# Workers AI turns text into embeddings (@cf/baai/bge-base-en-v1.5).
+[ai]
+binding = "AI"
+
+[vars]
+# How many chunks Claude gets to read per question. Tune with `npm run eval`.
+TOP_K = "6"
+
+# Secrets (set with `npx wrangler secret put NAME`, never committed):
+#   ANTHROPIC_API_KEY, APP_PASSWORD
