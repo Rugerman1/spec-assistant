@@ -25,10 +25,22 @@ Question ──► Worker /api/ask
 
 **Key ideas, in plain terms**
 
-- **Chunking by structure.** The spec is numbered (701, 701.2, 701.2.4). Each chunk is one numbered subsection, so a citation is always a real section number. Long subsections are split on paragraph breaks with a little overlap. Each chunk carries a breadcrumb ("Section 701 Portland Cement Concrete > 701.2 Materials > 701.2.4 Water") because a subsection titled "Water" means nothing on its own.
+- **Chunking by structure.** The spec is numbered (701, 701.2, 701.2.4). Each chunk is one numbered subsection, so a citation is always a real section number. Long subsections are split on paragraph breaks with a little overlap. Each chunk carries a breadcrumb ("Section 701 Portland Cement and Portland Cement Concrete > 701.2 Materials > 701.2.11 Water > 701.2.11.2 Water from a Public Water Supply") because a subsection titled "Water" means nothing on its own. On the 2025 edition (908 pages) this gives 2,268 chunks across 109 sections, and every one of the 2,455 subsections in the PDF's own table of contents is found.
 - **Hybrid retrieval.** Vector search finds passages with similar meaning even when the words differ. Keyword search catches exact spec language like "Class 4000" or "AASHTO M 85" that vector search can blur. Both rankings vote, and sections named in the question ("what does 105.2 say") go straight to the top.
 - **Grounded answers.** Claude only sees the retrieved passages, is told to answer only from them, and the API's citation feature ties each sentence to the exact paragraph it used. An answer with no citations counts as "not found".
-- **Evals.** `npm run eval` scores search (hit@k and MRR on questions with known answers) and, with `--answers`, whether Claude cited the right section and correctly refused out-of-scope questions.
+- **Evals.** `eval/questions.json` holds 25 questions with known answer sections plus 5 that the spec cannot answer. `npm run eval:local` scores the keyword half of search on your own machine with no account or API cost. `npm run eval` scores the deployed app's full hybrid search, and with `--answers` also checks whether Claude cited the right section and refused the out-of-scope questions.
+
+  Keyword-only result on the 2025 spec (the floor; the deployed app adds vector search on top):
+
+  | metric | keyword + section numbers only |
+  |---|---|
+  | hit@1 | 80% |
+  | hit@3 | 92% |
+  | hit@6 | 96% |
+  | hit@10 | 100% |
+  | MRR | 0.87 |
+
+  The one question outside the top 6 asks about a "city water system" while the spec says "public water supply", which is the kind of wording gap vector search exists to close.
 
 ## Stack
 
@@ -56,8 +68,9 @@ You need Node.js 20+, Python 3.11+, a free Cloudflare account, and an Anthropic 
 3. **Chunk it.**
    ```
    npm run extract
+   npm run eval:local
    ```
-   This writes `data\chunks.jsonl` and prints a report: page count, chunk count, chunk sizes, and a few samples. Skim the samples; each should start at a real subsection number.
+   The first writes `data\chunks.jsonl` and prints a report (908 pages, 2,268 chunks, median chunk about 530 characters) with a few samples. The second runs the keyword search check above; it should print the same table.
 4. **Create the Cloudflare pieces.**
    ```
    npx wrangler login
@@ -87,7 +100,7 @@ You need Node.js 20+, Python 3.11+, a free Cloudflare account, and an Anthropic 
    npm run eval
    npm run eval -- --answers
    ```
-   The first is search only. The second also asks Claude every question (a few cents total).
+   The first is the full hybrid search (keyword plus vectors), so it should beat the local table. The second also asks Claude every question (a few cents total) and reports how often the answer cited the right section and how often it said "not found" when it should.
 
 ## Cost
 
@@ -105,8 +118,9 @@ src/answer.ts          Claude call with search_result blocks and citations
 src/load.ts            writes chunks to D1 and Vectorize
 src/ui/page.ts         the question page
 scripts/load.mjs       uploads chunks to the deployed Worker
-eval/questions.json    questions with known answer sections, plus out-of-scope ones
-eval/run-eval.ts       hit@k, MRR, citation accuracy, refusal accuracy
+eval/questions.json    25 questions with known answer sections, plus 5 out-of-scope ones
+eval/local-search.ts   keyword-search check that runs locally with no account
+eval/run-eval.ts       hit@k, MRR, citation accuracy, refusal accuracy against the deployed app
 ```
 
 ## Tests
@@ -121,7 +135,8 @@ The unit tests use made-up sample text shaped like the spec, not real SCDOT text
 
 ## Known limits
 
-- Tables come through as flattened rows of text, so table-heavy answers (gradations, mix designs) are weaker. Better table extraction is the next improvement.
+- Tables come through as flattened rows of text (the Structural Concrete Table reads "Class 4000 Crushed Stone 611 4000 35:65 0.40"), so table-heavy answers are weaker. Better table extraction is the next improvement.
+- The answer step (Claude with citations) and the vector search have not been run yet; they need a deployed Worker with an API key. The chunker and keyword search are tested on the real spec.
 - Only the 2025 Standard Specifications are indexed. Supplemental specifications and special provisions can change a section, so the app may not reflect the latest requirement.
 - Index only public documents. Paid standards (AASHTO, ASTM) are copyrighted and don't belong in the index.
 

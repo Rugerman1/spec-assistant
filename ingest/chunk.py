@@ -12,6 +12,23 @@ RAG terms used here:
 
 This file only works on plain text, so it can be unit tested without a PDF.
 extract.py does the PDF part.
+
+What the 2025 SCDOT spec looks like after PyMuPDF extraction:
+
+    Division 200                                   Section 201   <- page header
+    DIVISION 200
+    EARTHWORK
+    Section 201 — Clearing and Grubbing
+    201.1   Description
+    1   Clear, grub, remove, and dispose of vegetation, obstructions, and
+        debris within designated limits.
+    201.3.1   General
+    1   Perform clearing and grubbing work before ...
+    2   Perform clearing and grubbing work by removing ...
+                          200-1                                  <- page footer
+
+Paragraphs inside a subsection are numbered (1, 2, 3) at the left margin.
+Long headings wrap onto a second line.
 """
 
 from __future__ import annotations
@@ -20,20 +37,33 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 
-# Headings in the SCDOT spec look like:
-#   DIVISION 700
-#   STRUCTURES
-#   SECTION 701
-#   PORTLAND CEMENT CONCRETE
-#   701.1 Description
-#   701.2.4 Water
 DIVISION_RE = re.compile(r"^DIVISION\s+(\d{3})\s*$")
-SECTION_RE = re.compile(r"^SECTION\s+(\d{3})\s*$")
-SUBSECTION_RE = re.compile(r"^(\d{3}(?:\.\d{1,3}){1,5})\.?\s+(\S.{0,150})$")
+# "Section 201 — Clearing and Grubbing" (the dash is what separates a real
+# heading from a cross-reference like "Section 305 and thoroughly compact").
+SECTION_RE = re.compile(r"^Section\s+(\d{3})\s*[—–-]+\s*(\S.*)$")
+# The all-caps two-line form ("SECTION 201" / "CLEARING AND GRUBBING") that
+# the table of contents uses.
+SECTION_CAPS_RE = re.compile(r"^SECTION\s+(\d{3})\s*$")
+# No period after the number: "203.2.1.8. When the item" is a cross-reference.
+SUBSECTION_RE = re.compile(r"^(\d{3}(?:\.\d{1,3}){1,5})\s+(\S.{0,150})$")
+# Numbered paragraphs: "2   When a unit of government ...". At least two
+# spaces, so a wrapped line like "18 ft. Clear and grub" doesn't count.
+PARA_RE = re.compile(r"^(\d{1,2})\s{2,}(\S.*)$")
+LONE_NUMBER_RE = re.compile(r"^\d{1,2}$")
+BULLET_RE = re.compile(r"^(•|[-–]\s|\(?[a-z0-9]{1,2}[.)]\s)")
 # Printed page numbers in the footer, like "700-12".
 PAGE_LABEL_RE = re.compile(r"^(\d{3}-\d{1,3})$")
+# Running header on every body page.
+HEADER_RE = re.compile(r"^Division\s+\d{3}\s+Section\s+\d{3}$")
 ROMAN_RE = re.compile(r"^[ivxlc]{1,6}$", re.IGNORECASE)
-DOT_LEADER_RE = re.compile(r"\.{5,}|(?:\. ){4,}")
+DOT_LEADER_RE = re.compile(r"\s*(?:\.{4,}|(?:\. ){4,})\s*")
+# A table-of-contents or index line: dot leaders, then a printed page number.
+TOC_LINE_RE = re.compile(r"(?:\.{3,}|(?:\. ){3,})\s*\d{3}-\d{1,3}$")
+# A heading that ends like this continues on the next line.
+CONNECTOR_END_RE = re.compile(
+    r"(\b(and|or|of|for|the|by|to|in|on|with|before|after|from|at|a|an|over)|,|&)$",
+    re.IGNORECASE,
+)
 
 # About 500 tokens. Long enough to hold a full requirement with its
 # conditions, short enough that the retrieved set stays focused.
@@ -56,7 +86,7 @@ class Unit:
     division: str  # "700"
     division_title: str
     section_no: str  # "701"
-    section_title: str  # "PORTLAND CEMENT CONCRETE"
+    section_title: str  # "Portland Cement Concrete"
     parents: list[tuple[str, str]] = field(default_factory=list)
     lines: list[Line] = field(default_factory=list)
 
@@ -77,14 +107,18 @@ class Chunk:
     text: str
 
 
+def _squash(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _norm(line: str) -> str:
-    return re.sub(r"\d+", "#", line.strip())
+    return re.sub(r"\d+", "#", _squash(line))
 
 
 def clean_pages(pages: list[str]) -> list[Line]:
     """Split pages into lines, keep each line's page, and drop running
-    headers/footers (lines that repeat on many pages) and table-of-contents
-    lines with dot leaders."""
+    headers/footers (lines that repeat on many pages), table-of-contents
+    pages, and printed page numbers."""
     split = [[l.rstrip() for l in p.splitlines()] for p in pages]
     counts: Counter[str] = Counter()
     for lines in split:
@@ -95,8 +129,10 @@ def clean_pages(pages: list[str]) -> list[Line]:
 
     out: list[Line] = []
     for i, lines in enumerate(split, start=1):
-        if sum(1 for l in lines if DOT_LEADER_RE.search(l)) >= 5:
-            continue  # a table-of-contents page
+        if sum(1 for l in lines if TOC_LINE_RE.search(l.strip())) >= 5 or any(
+            "TABLE OF CONTENTS" in l for l in lines
+        ):
+            continue  # a table-of-contents or index page
         label = ""
         for l in lines:
             m = PAGE_LABEL_RE.match(l.strip())
@@ -106,18 +142,75 @@ def clean_pages(pages: list[str]) -> list[Line]:
             s = l.strip()
             if not s:
                 continue
-            if PAGE_LABEL_RE.match(s) or ROMAN_RE.match(s):
+            if PAGE_LABEL_RE.match(s) or HEADER_RE.match(_squash(s)):
                 continue
+            if not label and ROMAN_RE.match(s):
+                continue  # front-matter page numbers
             if _norm(s) in repeating and not SECTION_RE.match(s):
                 continue
-            if DOT_LEADER_RE.search(s):
+            if TOC_LINE_RE.search(s):
                 continue
+            # Table rows like "Slump ........ 7 in. to 9 in." keep their value.
+            s = DOT_LEADER_RE.sub(": ", s)
             out.append(Line(s, i, label))
     return out
 
 
 def _num_key(num: str) -> tuple[int, ...]:
     return tuple(int(x) for x in num.split("."))
+
+
+def _is_heading_line(s: str) -> bool:
+    return bool(
+        PARA_RE.match(s)
+        or SUBSECTION_RE.match(s)
+        or SECTION_RE.match(s)
+        or SECTION_CAPS_RE.match(s)
+        or DIVISION_RE.match(s)
+        or PAGE_LABEL_RE.match(s)
+    )
+
+
+STOPWORDS = {
+    "a", "an", "and", "or", "of", "for", "the", "to", "in", "on", "with", "by",
+    "from", "at", "over", "through", "thru", "as", "is", "are", "if", "when",
+    "unless", "where", "per", "under", "until", "shall", "will", "may",
+}
+
+
+def _title_start(rest: str) -> bool:
+    """A heading starts with a capital, a digit ("15-Lamp Arrow Panel") or a
+    short lowercase word that isn't a connector ("pH Factor"); a wrapped
+    cross-reference ("701.2.4 and the...") starts with a connector."""
+    first = rest[:1]
+    if first.isupper() or first.isdigit() or first == "(":
+        return True
+    word = re.match(r"[a-z]+", rest)
+    return bool(word) and word.group(0) not in STOPWORDS and len(rest.split()) <= 6
+
+
+CONNECTOR_START_RE = re.compile(
+    r"^(and|or|of|for|the|to|in|on|with|by|from|at|over)\s+(.+)$", re.IGNORECASE
+)
+
+
+def _title_continues(title: str, nxt: str) -> bool:
+    """'105.4 Coordination of Plans, Specifications, and Special' followed by
+    'Provisions': the heading wrapped. Body paragraphs are numbered, so an
+    unnumbered Title Case fragment right after a heading is the rest of it."""
+    if not nxt or len(nxt) > 80 or _is_heading_line(nxt):
+        return False
+    nxt = _squash(nxt)
+    m = CONNECTOR_START_RE.match(nxt)
+    body = m.group(2) if m else nxt
+    if not (body[:1].isupper() or body[:1] == "("):
+        return False
+    if re.search(r"[.;:]$", nxt) and not nxt.endswith("etc."):
+        return False
+    if CONNECTOR_END_RE.search(title.rstrip()):
+        return True
+    words = [w for w in re.findall(r"[A-Za-z][\w'/-]*", body) if w.lower() not in STOPWORDS]
+    return bool(words) and sum(w[:1].isupper() for w in words) / len(words) >= 0.6
 
 
 def parse_units(lines: list[Line]) -> list[Unit]:
@@ -130,51 +223,63 @@ def parse_units(lines: list[Line]) -> list[Unit]:
     stack: list[tuple[str, str]] = []  # open ancestors (number, title)
     i = 0
     while i < len(lines):
-        s = lines[i].text
+        s = _squash(lines[i].text)
         nxt = lines[i + 1].text if i + 1 < len(lines) else ""
 
         m = DIVISION_RE.match(s)
         if m:
-            division, division_title = m.group(1), nxt.title()
+            division, division_title = m.group(1), _squash(nxt).title()
             i += 2
             continue
 
         m = SECTION_RE.match(s)
-        if m:
-            section_no, section_title = m.group(1), nxt
+        caps = SECTION_CAPS_RE.match(s)
+        if m or caps:
+            if m:
+                section_no, section_title = m.group(1), m.group(2).strip()
+                i += 1
+            else:
+                section_no, section_title = caps.group(1), _squash(nxt)
+                i += 2
+            while i < len(lines) and _title_continues(section_title, lines[i].text):
+                section_title += " " + _squash(lines[i].text)
+                i += 1
             current = Unit(section_no, section_title, division, division_title,
                            section_no, section_title)
             units.append(current)
             stack, last_key = [], (int(section_no),)
-            i += 2
             continue
 
         m = SUBSECTION_RE.match(s)
         if m and section_no and m.group(1).split(".")[0] == section_no:
             num, rest = m.group(1), m.group(2).strip()
             key = _num_key(num)
-            prev = lines[i - 1].text if i else ""
+            prev = _squash(lines[i - 1].text) if i else ""
             # A real heading moves forward in numbering, starts with a capital
             # letter, and doesn't continue a cross-reference. This filters out
             # wrapped sentences like "...as directed in Subsection / 105.2 of".
             looks_like_heading = (
                 key > last_key
                 and len(key) - len(last_key) <= 1
-                and rest[:1].isupper()
-                and not re.search(r"\b(Subsections?|Sections?|and|or|in|of|to)$", prev)
+                and _title_start(rest)
+                and not re.search(r"\b(Subsections?|Sections?|and|or|in|of|to|through|thru)$", prev)
             )
             if looks_like_heading:
                 title, body = _split_heading(rest)
+                heading_line = lines[i]
+                i += 1
+                while not body and i < len(lines) and _title_continues(title, lines[i].text):
+                    title += " " + _squash(lines[i].text)
+                    i += 1
                 while stack and not num.startswith(stack[-1][0] + "."):
                     stack.pop()
                 current = Unit(num, title, division, division_title,
                                section_no, section_title, parents=list(stack))
                 if body:
-                    current.lines.append(Line(body, lines[i].page, lines[i].label))
+                    current.lines.append(Line(body, heading_line.page, heading_line.label))
                 units.append(current)
                 stack.append((num, title))
                 last_key = key
-                i += 1
                 continue
 
         if current is not None:
@@ -185,28 +290,34 @@ def parse_units(lines: list[Line]) -> list[Unit]:
 
 def _split_heading(rest: str) -> tuple[str, str]:
     """'Water. Use water that ...' -> ('Water', 'Use water that ...').
-    Most headings sit alone on their line; deep ones may run into text."""
-    m = re.match(r"^([^.:]{1,80})[.:]\s+(.+)$", rest)
+    Headings normally sit alone on their line; this catches the rare one
+    that runs straight into its text."""
+    m = re.match(r"^([^.:]{1,80})[.:]\s+(.{25,})$", rest)
     if m and m.group(1)[:1].isupper():
         return m.group(1).strip(), m.group(2).strip()
     return rest.rstrip(".:"), ""
 
 
 def _join(lines: list[Line]) -> str:
-    """Rejoin PDF lines into paragraphs. A line that ends a sentence, or a
-    next line that starts a list item, starts a new paragraph."""
-    out: list[str] = []
+    """Rejoin PDF lines into paragraphs. A numbered paragraph ("2   When
+    ...") or a bullet starts a new one; the number itself is dropped."""
+    paras: list[str] = []
+    pending_number = False
     for ln in lines:
-        t = ln.text
-        if out and not re.search(r"[.:;]$", out[-1]) and not re.match(r"^(\(?[A-Za-z0-9]{1,3}[.)]|•|-)\s", t):
-            # Mid-sentence wrap; also undo hyphenated line breaks.
-            if out[-1].endswith("-") and t[:1].islower():
-                out[-1] = out[-1][:-1] + t
-            else:
-                out[-1] = out[-1] + " " + t
+        raw = ln.text
+        if LONE_NUMBER_RE.match(raw):
+            pending_number = True  # the number landed on its own line
+            continue
+        m = PARA_RE.match(raw)
+        t = _squash(m.group(2) if m else raw)
+        if m or pending_number or BULLET_RE.match(t) or not paras:
+            paras.append(t)
+        elif paras[-1].endswith("-") and t[:1].islower():
+            paras[-1] = paras[-1][:-1] + t  # undo a hyphenated line break
         else:
-            out.append(t)
-    return "\n".join(out)
+            paras[-1] = paras[-1] + " " + t
+        pending_number = False
+    return "\n".join(paras)
 
 
 def _split_long(text: str) -> list[str]:
@@ -226,12 +337,19 @@ def _split_long(text: str) -> list[str]:
             p = p[cut:].strip()
         if cur and len(cur) + len(p) + 1 > MAX_CHARS:
             parts.append(cur)
-            cur = cur[-OVERLAP_CHARS:].split(" ", 1)[-1] + "\n" + p  # carry a little context over
+            cur = _tail_sentences(cur) + "\n" + p  # carry a little context over
         else:
             cur = f"{cur}\n{p}" if cur else p
     if cur:
         parts.append(cur)
     return parts
+
+
+def _tail_sentences(text: str) -> str:
+    """The last OVERLAP_CHARS or so of a chunk, starting at a sentence."""
+    tail = text[-OVERLAP_CHARS:]
+    cut = tail.find(". ")
+    return tail[cut + 2 :] if 0 <= cut < len(tail) - 20 else tail.split(" ", 1)[-1]
 
 
 def build_chunks(units: list[Unit]) -> list[Chunk]:
@@ -240,7 +358,7 @@ def build_chunks(units: list[Unit]) -> list[Chunk]:
         body = _join(u.lines).strip()
         if len(body) < MIN_BODY_CHARS:
             continue  # heading-only units: their title still appears in children's paths
-        crumbs = [f"Section {u.section_no} {u.section_title.title()}"]
+        crumbs = [f"Section {u.section_no} {u.section_title}"]
         crumbs += [f"{n} {t}" for n, t in u.parents]
         if u.section != u.section_no:
             crumbs.append(f"{u.section} {u.title}")
@@ -249,8 +367,8 @@ def build_chunks(units: list[Unit]) -> list[Chunk]:
         for n, part in enumerate(parts, start=1):
             cid = u.section if len(parts) == 1 else f"{u.section}#{n}"
             chunks.append(Chunk(
-                id=cid, section=u.section, title=u.title if u.section != u.section_no else u.section_title.title(),
-                section_no=u.section_no, section_title=u.section_title.title(),
+                id=cid, section=u.section, title=u.title,
+                section_no=u.section_no, section_title=u.section_title,
                 division=u.division, division_title=u.division_title,
                 path=path, page_start=u.lines[0].page, page_end=u.lines[-1].page,
                 page_label=u.lines[0].label, text=part,
